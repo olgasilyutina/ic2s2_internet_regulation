@@ -1,0 +1,675 @@
+---
+title: "net_regulation"
+output: html_document
+---
+
+```{r}
+library(jsonlite)
+library(stringr)
+library(tidyr)
+library(dplyr)
+library(widyr)
+library(ggplot2)
+library(data.table)
+library(readr)
+library(psych)
+library(ggraph)
+#library(stm)
+library(tm)
+library(igraph)
+library(lubridate)
+library(tidytext)
+```
+
+```{r}
+integrum = readLines("/Users/o.silutina/Downloads/net_regulation/integrum_net_regulation_2.json") %>% 
+  str_c(collapse = ",") %>%  #collapsing by comma into list objects
+  (function(str) str_c("[", str, "]")) %>% #uniting list objects into list
+  fromJSON(simplifyDataFrame = T) #convert into R object
+ 
+df = as.data.frame(unlist(integrum)) #converting into data frame
+
+setDT(df, keep.rownames = TRUE)[] 
+df$rn <- str_replace(df$rn, "[0-9]+", "") #removing digits in row names
+
+colnames(df)[2] <- "values"
+df$values <- as.character(df$values) #converting column with values into character 
+df1 <- df %>%
+   group_by(rn) %>% #grouping by names from first column
+   mutate(ind = row_number()) %>% #creating id
+   spread(rn, values) #making data frame with column names from first column
+df1$site = 'integrum.ru'
+colnames(df1)[6] = 'text'
+head(df1)
+df1 = df1 %>% select(date, source, text, site)
+df1$date <- strptime(as.character(df1$date), "%d.%m.%Y")
+df1$date <- format(df1$date, "%Y-%m-%d")
+na_df1 <- df1[rowSums(is.na(df1)) > 0,]
+
+write.csv(df1, file="/Users/o.silutina/Downloads/integrum_data.csv", row.names=F)
+```
+
+
+```{r}
+filenames <- list.files(path="~/Downloads/fin_data",
+    pattern="*csv")
+```
+
+```{r}
+set.seed(1)
+setwd("~/Downloads/net_data")
+filenames <- list.files(path="~/Downloads/net_data",
+    pattern="*csv")
+
+full_data <- data.frame(
+  cat=character(),
+                term=character(),
+                 count=numeric(),
+                 stringsAsFactors=FALSE) 
+for (fl in filenames){  
+  dt_gath = read_csv(paste('~/Downloads/net_data/', fl, sep=''), locale = locale(encoding = 'utf-8'))
+  dt <- dt_gath %>% dplyr::select(cat, term, count)
+  full_data = rbind(full_data, dt)
+}
+full_data = full_data[!duplicated(full_data), ]
+full_data_num = full_data %>% group_by(cat) %>% summarize(num_words = n_distinct(term))
+sum(full_data_num$num_words)
+full_data <- full_data %>% bind_tf_idf(term, cat, count)
+
+only_terms = full_data['term']
+only_terms = only_terms[!duplicated(only_terms), ]
+
+
+Encoding(full_data[['term']]) <- "UTF-8"
+quantile(full_data$tf_idf)
+tfidf = full_data$tf_idf
+tfidf_25 = tfidf[tfidf < 0.003976296]
+mean(tfidf_25)
+```
+
+```{r}
+dfs <- data.frame(membership=character(),
+                 term=character(),
+                 count=numeric(),
+                 stringsAsFactors=FALSE) 
+for (fl in filenames[1:9]){  
+  dt_gath = read_csv(paste('~/Downloads/net_data/', fl, sep=''))
+  med_drug <- dt_gath %>% dplyr::select(id, cat, term, count)
+  full_data =  dplyr::select(full_data, cat, term, tf_idf)
+  med_drug <- left_join(med_drug, full_data, by=c('cat', 'term'))
+  med_drug <- med_drug %>% dplyr::select(id, term, tf_idf) %>% filter(tf_idf > 0.002811687)
+  med_drug <- as.data.frame(med_drug)
+  pc <- graph_from_data_frame(med_drug, directed = F) 
+  V(pc)$type <- FALSE
+  V(pc)$type[V(pc)$name %in% med_drug[, 1]] <- TRUE
+  one_mode_networks <- bipartite_projection(pc)
+  sgdf.copy <- one_mode_networks$proj1
+  set.seed(1)
+  fastgreedy_main <- cluster_louvain(sgdf.copy)
+  table_fastgreedy_main <- cbind(fastgreedy_main$membership, fastgreedy_main$names)
+  table_fastgreedy_main = as.data.frame(table_fastgreedy_main)
+  table_fastgreedy_main$V1 = as.character(table_fastgreedy_main$V1)
+  table_fastgreedy_main$V2 = as.character(table_fastgreedy_main$V2)
+  colnames(table_fastgreedy_main)[1] <- "membership"
+  colnames(table_fastgreedy_main)[2] <- "term"
+  table_fastgreedy_main$membership <- paste(table_fastgreedy_main$membership, '_', fl, sep='')
+  head(table_fastgreedy_main, 1)
+  dfs = rbind(dfs, table_fastgreedy_main)
+}
+dfs$cat <- as.numeric(gsub("(.*?_nd_ic2s2_)(\\d+)(\\.csv)", "\\2", dfs$membership))
+
+fin_df = left_join(dfs, select(full_data, cat, term, tf_idf), by=c('cat', 'term'))
+fin_df$cluster =  gsub("(.*)(_nd_)(.*?)(.csv)", "\\1", fin_df$membership)
+fin_df$cluster = paste(fin_df$cat, fin_df$cluster, sep="_")
+
+words_by_cluster = fin_df %>% group_by(fin_df$memb) %>% count()
+write.csv(words_by_cluster, '~/Downloads/words_by_cluster_ic2s2.csv', row.names=F)
+wbc = read_csv('~/Downloads/words_by_cluster_ic2s2.csv')
+#words_by_cluster = read_csv('~/Downloads/words_by_cluster.csv')
+fin_df %>% head()
+```
+
+```{r}
+fin_sum = fin_df %>% group_by(cat) %>% summarize(sum_tfinf = sum(tf_idf))
+fin_df = left_join(fin_df, fin_sum, by='cat')
+fin_df$norm_tfidf = fin_df$tf_idf/fin_df$sum_tfinf
+max_term = fin_df %>% filter(nchar(term) > 9) %>% group_by(cluster) %>%
+  slice(which.max(norm_tfidf)) %>% mutate(memb = paste(term, cluster, sep = "_")) %>% select(cluster, memb)
+fin_df = left_join(fin_df, max_term, by='cluster')
+
+library(reshape2)
+w <- dcast(fin_df, memb~term, value.var='norm_tfidf')
+w = w[!is.na(w$memb),]
+
+samp2 <- w[,-1]
+rownames(samp2) <- w[,1]
+samp2[is.na(samp2)] <- 0
+
+library(wordspace)
+library(Matrix)
+samp2 = as.matrix(samp2)
+A <- as(samp2, "sparseMatrix")       # see also `vignette("Intro2Matrix")`
+B <- Matrix(samp2, sparse = TRUE)  
+samp2_dsm = dsm(A)
+dm = dist.matrix(samp2_dsm, method="cosine", convert=FALSE)
+dm[ row(dm) == col(dm) ] <- NA
+
+dm_df = as.data.frame(dm)
+
+dm_df = dm_df %>% 
+  tibble::rownames_to_column('id') %>%  # creates an ID number
+  gather(dept, cnt, colnames(dm_df)[1]:colnames(dm_df)[length(colnames(dm_df))]) %>% 
+  group_by(id) %>% 
+  slice(which.max(cnt))  #?????? ??????????????????
+
+dm_df = dm_df[!duplicated(data.frame(t(apply(dm_df[1:2], 1, sort)), dm_df$cnt)),]
+dm_df[is.na(dm_df)] <- 0
+#dm_df = dm_df %>% filter(cnt < 90)
+
+nodes = data.frame(dm_df$id)
+nodes$node = c(0:(nrow(nodes)-1))
+colnames(nodes)[1] = 'name'
+links = as.data.frame(dm_df)
+names(links) = c("source", "target", "value")
+
+colnames(nodes)[1] = 'source'
+links = left_join(links, nodes, by='source')
+links = links %>% select(-source)
+colnames(links)[3] = 'source'
+
+colnames(nodes)[1] = 'target'
+links = left_join(links, nodes, by='target')
+links = links %>% select(-target)
+colnames(links)[3] = 'target'
+
+links = na.omit(links)
+colnames(nodes)[1] = 'name'
+links = links %>% arrange(source)
+
+links = links[!duplicated(data.frame(t(apply(links[2:3], 1, sort)), links$value)),]
+links = group_by(links, value) %>% slice(1)
+links = links[!duplicated(links[,1]),]
+links_values = links %>% select(value)
+
+write.csv(links, "~/Downloads/links_ic2s2.csv", row.names = F)
+write.csv(nodes, "~/Downloads/nodes_ic2s2.csv", row.names = F)
+write.csv(nodes, "~/Downloads/words_for_clusters_ic2s2.csv", row.names = F)
+
+```
+
+
+```{r}
+#fin_df = fin_df %>% bind_tf_idf(term, cat, tf_idf)
+fin_sum = fin_df %>% group_by(cat) %>% summarize(sum_tfinf = sum(tf_idf))
+fin_df = left_join(fin_df, fin_sum, by='cat')
+fin_df$norm_tfidf = fin_df$tf_idf/fin_df$sum_tfinf
+#fin_df = fin_df %>% filter(norm_tfidf > 0.0003309846)0.0003826638
+max_term = fin_df %>% filter(nchar(term) > 9) %>% group_by(cluster) %>%
+  slice(which.max(norm_tfidf)) %>% mutate(memb = paste(term, cluster, sep = "_")) %>% select(cluster, memb)
+fin_df = left_join(fin_df, max_term, by='cluster')
+
+library(reshape2)
+w <- dcast(fin_df, memb~term, value.var='norm_tfidf')
+w <- w[-nrow(w),]
+
+samp2 <- w[,-1]
+rownames(samp2) <- w[,1]
+samp2[is.na(samp2)] <- 0
+
+library(wordspace)
+library(Matrix)
+samp2 = as.matrix(samp2)
+A <- as(samp2, "sparseMatrix")       # see also `vignette("Intro2Matrix")`
+B <- Matrix(samp2, sparse = TRUE)  
+samp2_dsm = dsm(A)
+dm = dist.matrix(samp2_dsm)
+dm[ row(dm) == col(dm) ] <- NA
+
+dm_df = as.data.frame(dm)
+
+dm_df = dm_df %>% 
+  tibble::rownames_to_column('id') %>%  # creates an ID number
+  gather(dept, cnt, colnames(dm_df)[1]:colnames(dm_df)[length(colnames(dm_df))])
+hist(dm_df$cnt)
+
+dm_df = dm_df %>% 
+  tibble::rownames_to_column('id') %>%  # creates an ID number
+  gather(dept, cnt, colnames(dm_df)[1]:colnames(dm_df)[length(colnames(dm_df))]) %>% 
+  group_by(id) %>% 
+  slice(which.min(cnt))  #?????? ??????????????????
+
+dm_df = dm_df[!duplicated(data.frame(t(apply(dm_df[1:2], 1, sort)), dm_df$cnt)),]
+
+
+ar = arrow(angle=30, length=unit(3, 'mm'), end='last', type='open')
+
+net <- graph_from_data_frame(dm_df, directed = T) 
+ggraph(net, layout = "fr") +
+  geom_edge_link(aes(width = -cnt/100), show.legend = FALSE) +
+  geom_edge_fan(aes(width = -cnt/100), arrow=ar, show.legend = FALSE) +
+  scale_edge_width(range = c(0.2, 1)) +
+  geom_node_point(alpha = 0.7, size = 5) +
+  geom_node_text(aes(label = name), size=2, repel = TRUE) +
+  theme_void() +
+  theme(legend.position="none", text=element_text(family="Times New Roman"))
+
+library(gplots)
+heatmap.2(dm,dendrogram='none', Rowv=TRUE, Colv=TRUE,trace='none', key=F, cexRow=0.5, cexCol = 0.5, margins=c(8,8))
+
+cat_word_num <- read_csv("~/cat_word_num.csv")
+
+fin_tfidf = left_join(fin_df, cat_word_num, by='cat')
+
+
+write.csv(fin_df, '~/Downloads/fin_df_ic2s2.csv', row.names = F)
+write.csv(dm_df, '~/Downloads/all_similarity_df_ic2s2.csv', row.names = F)
+dm_df[is.na(dm_df)] <- 0
+dm_df = dm_df %>% filter(cnt < 90)
+quantile(dm_df$cnt)
+dm_df = dm_df %>% filter(cnt < 82.92007)
+dm_df = dm_df %>% filter(cnt < 85.21981)
+dm_df = dm_df %>% filter(cnt != 0)
+paste("\\", substr(val, 1, nchar(val)-1), "\\]", sep="") 
+ff = dm_df %>% dplyr::filter(grepl("\\(2009-01-31, 2009-07-31\\]",dept))
+
+buckets = unique(gsub("([1-9])(_)(.*$)", "\\1", dm_df$id)) 
+df <- (matrix(ncol = length(buckets), nrow = 20))
+colnames(df) <- buckets
+
+for (val in buckets) {
+  ff = dm_df %>% dplyr::filter(grepl(val,dept))
+  print(head(ff))
+  for (i in c(unique(ff$id), unique(ff$dept))) {
+    col_df = gsub("([1-9])(_)(.*$)", "\\1", i)
+    print(col_df)
+    print(i)
+    df[length(na.omit(df[, col_df])) + 1, col_df] = i
+    }
+}
+#, axis8=df[,buckets[8]], axis9=df[,buckets[9]], axis10=df[,buckets[10]], axis11=df[,buckets[11]], axis12=df[,buckets[12]], axis13=df[,buckets[13]], axis14=df[,buckets[14]], axis15=df[,buckets[15]], axis16=df[,buckets[16]], axis17=df[,buckets[17]], axis18=df[,buckets[18]]
+df = as.data.frame(df)
+df = df[1:7,]
+library(ggalluvial)
+ggplot(data=df, aes(y = rep(0.3, 7), axis1 = df[,buckets[1]], axis2 = df[,buckets[2]], axis3 = df[,buckets[3]], axis4 = df[,buckets[4]], axis5 = df[,buckets[5]], axis6=df[,buckets[6]], axis7=df[,buckets[7]])) +
+  geom_alluvium(width = 0.3, alpha=0.7) +
+   geom_stratum(width = 1)+
+  geom_flow(na.rm = TRUE)+
+  geom_text(stat = "stratum", discern = TRUE, label.strata = TRUE, na.rm = TRUE)
+
+df[1, '(2009-01-31, 2009-07-31]'] = 3
+length(na.omit(df[, '(2009-01-31, 2009-07-31]']))
+
+library(networkD3)
+nodes = data.frame(dm_df$id)
+nodes$node = c(0:(nrow(nodes)-1))
+colnames(nodes)[1] = 'name'
+links = as.data.frame(dm_df)
+names(links) = c("source", "target", "value")
+
+colnames(nodes)[1] = 'source'
+links = left_join(links, nodes, by='source')
+links = links %>% select(-source)
+colnames(links)[3] = 'source'
+
+colnames(nodes)[1] = 'target'
+links = left_join(links, nodes, by='target')
+links = links %>% select(-target)
+colnames(links)[3] = 'target'
+
+links = na.omit(links)
+colnames(nodes)[1] = 'name'
+links = links %>% arrange(source)
+sankeyNetwork(Links = links, Nodes = nodes,
+ Source = "source", Target = "target",
+ Value = "value", NodeID = "name",
+ fontSize= 12, nodeWidth = 30, iterations = 0)
+
+links = links[!duplicated(data.frame(t(apply(links[2:3], 1, sort)), links$value)),]
+
+write.csv(links, "~/Downloads/links_ic2s2.csv", row.names = F)
+write.csv(nodes, "~/Downloads/nodes_ic2s2.csv", row.names = F)
+
+```
+
+```{r}
+i="2009"
+  setwd("~/Downloads/net_regulation/")
+  med_drug <- read_csv('~/Downloads/reg_network_noun.csv')
+   med_drug = med_drug %>% filter(word != 'none') %>% filter(word != '??????????????????????????') %>% filter(word != '????????????????')
+num_words = med_drug %>% select(cat, word)
+num_words = num_words[!duplicated(num_words), ]
+num_words = num_words %>% group_by(cat) %>% summarize(reg_words = n())
+num_words = na.omit(num_words)     
+     
+  med_drug = med_drug %>% filter(word != 'none', cat == as.character(i)) %>% filter(word != '??????????????????????????') %>% filter(word != '????????????????')
+
+  med_drug = med_drug %>% filter(nchar(word) > 4) %>% select(num_text, word)
+  med_drug = med_drug[!duplicated(med_drug), ]
+  med_drug_num = med_drug %>% group_by(word) %>% count()
+
+  med_drug = left_join(med_drug, med_drug_num, by='word')
+  med_drug = med_drug[!duplicated(med_drug), ]
+  #filter(n > quantile(med_drug_num$n, c(.75))) %>%
+  med_drug = med_drug %>% filter(n > quantile(med_drug_num$n, c(.75))) %>% select(num_text, word)
+
+  med_drug = as.data.frame(med_drug)
+  med_drug <- na.omit(med_drug)
+
+  pc <- graph_from_data_frame(med_drug, directed = F) 
+  V(pc)$type <- FALSE
+  V(pc)$type[V(pc)$name %in% med_drug[, 1]] <- TRUE
+  one_mode_networks <- bipartite_projection(pc)
+  sgdf.copy <- one_mode_networks$proj1
+  set.seed(1)
+  
+  fastgreedy_main <- cluster_louvain(sgdf.copy)
+  table_fastgreedy_main <- cbind(fastgreedy_main$membership, fastgreedy_main$names)
+  table_fastgreedy_main = as.data.frame(table_fastgreedy_main)
+  table_fastgreedy_main$V1 = as.character(table_fastgreedy_main$V1)
+  table_fastgreedy_main$V2 = as.character(table_fastgreedy_main$V2)
+#  colnames(table_fastgreedy_main)[1] <- "membership"
+ # colnames(table_fastgreedy_main)[2] <- "term"
+  
+#ar = arrow(angle=30, length=unit(3, 'mm'), end='last', type='open')
+  V(sgdf.copy)$Clusters = as.character(table_fastgreedy_main$V1[match(V(sgdf.copy)$name, table_fastgreedy_main$V2)])
+
+
+  data_degree = as.data.frame((degree((sgdf.copy))))
+  V(sgdf.copy)$degree = data_degree$`(degree((sgdf.copy)))`
+
+#write.csv(table_fastgreedy_main, '~/Downloads/table_fastgreedy_2017.csv', row.names=F)
+
+  trans <- read_csv(paste('~/Downloads/translated_words_', i,'.csv', sep=""))
+
+  print(paste("net_topics_", i,".png", sep=""))
+  png(filename=paste("net_topics_RUS", i,".png", sep=""),width=1350, height=980)
+  set.seed(1)
+  ggraph(sgdf.copy, layout = "auto") +
+    geom_edge_link(width=0.3, alpha=0.1, show.legend = FALSE) +
+    geom_edge_fan(width=0.3, alpha=0.03, color='grey', show.legend = FALSE) +
+    scale_edge_width(range = c(0.2, 0.3)) +
+    geom_node_point(aes(color=V(sgdf.copy)$Clusters), alpha = 0.7, palette="Set2") +
+    geom_node_text(label=V(sgdf.copy)$name, size=6, repel = T) +
+  theme_void() +
+  theme(legend.position="none", text=element_text(family="Times New Roman"))
+  dev.off()
+#aes(label=trans$translated), 
+  
+set.seed(1)
+ceb <- cluster_fast_greedy(sgdf.copy) 
+#png(filename="TNR_dend_countr.png",width=1280, height=780) #add cex=2
+par(mar=c(5, 6, 4, 1), cex=0.75, family="Times")
+dendPlot(ceb, mode="hclust", colbar=c("#7B68EE", "#B22222", "#228B22"))
+```
+
+
+
+
+```{r}
+library(plotly)
+p <- plot_ly(
+  domain = c(
+    x =  c(0,8),
+    y =  c(0,8)
+  ),
+  orientation = "h",
+  valueformat = ".0f",
+  valuesuffix = "Customers",
+  arrangement="freeform",
+
+
+  node = list(
+    label = dm_df$id,
+    pad = 15,
+    thickness = 15,
+    line = list(
+      color = "black",
+      width = 0.5
+    )
+  ),
+
+  link = list(
+    source = dm_df$id,
+    target = dm_df$dept,
+    value =  dm_df$cnt
+  )
+) %>% 
+  layout(
+    title = "",
+    font = list(
+      size = 10
+    ),
+    xaxis = list(showgrid = F, zeroline = F),
+    yaxis = list(showgrid = F, zeroline = F)
+  )
+
+p
+```
+
+
+
+
+
+
+
+
+```{r}
+
+
+
+med_drug <- dt_gath %>% dplyr::select(id, term) #selecting columns to get text-country dataset
+med_drug <- as.data.frame(med_drug)
+#making graph object from data frame
+pc <- graph_from_data_frame(med_drug, directed = F) 
+#plot(pc)
+#https://stackoverflow.com/questions/44687623/bipartite-graph-projection-error-igraph-rstudio
+#creating bipartite graph
+V(pc)$type <- FALSE
+V(pc)$type[V(pc)$name %in% med_drug[, 1]] <- TRUE
+is.bipartite(pc)
+
+one_mode_networks <- bipartite_projection(pc)
+
+#getting projection
+sgdf.copy <- one_mode_networks$proj1
+#deleting verticles with degree less than 100
+#sgdf.copy <- delete.vertices(symt_graph, 
+#            V(symt_graph)[ degree(symt_graph) < 100] )
+
+#applying fastgreedy algorithm
+fastgreedy_main <- fastgreedy.community(sgdf.copy)
+eb <- edge.betweenness(sgdf.copy)
+
+#commented part of code is for igraph network
+#l <- layout.auto(sgdf.copy)
+#making custom palette
+#med <- colorRampPalette(c("#228B22", "#7B68EE", "#B22222"))
+#colors <- med(max(membership(fastgreedy_main)))
+#colors_frame <- med(max(membership(fastgreedy_main)))
+
+#getting membership as an attribute for nodes in network
+table_fastgreedy_main <- cbind(fastgreedy_main$membership, fastgreedy_main$names)
+table_fastgreedy_main = as.data.frame(table_fastgreedy_main)
+
+table_fastgreedy_main$V1 = as.character(table_fastgreedy_main$V1)
+table_fastgreedy_main$V2 = as.character(table_fastgreedy_main$V2)
+
+V(sgdf.copy)$Clusters = as.character(table_fastgreedy_main$V1[match(V(sgdf.copy)$name, table_fastgreedy_main$V2)])
+V(sgdf.copy)$degree = degree(sgdf.copy)
+#png(filename="TNR_net_countr.png",width=2560, height=1600) #saving plots, add vertex.label.cex = 3
+#plotting the network
+#set.seed(1)
+#plot(sgdf.copy, vertex.label.cex = 0.75, vertex.label.color="black", vertex.size=degree(sgdf.copy)/10, vertex.color=colors[membership(fastgreedy_main)], vertex.frame.color=colors_frame[membership(fastgreedy_main)], edge.width=eb/20, layout=l)
+clusters_country2 <- as.data.frame(unlist(fastgreedy_main))
+setDT(clusters_country2, keep.rownames = TRUE)[]
+clusters_country2$rn <- str_replace(clusters_country2$rn, "[0-9]+", "") #removing digits in row names
+
+colnames(clusters_country2)[2] <- "values"
+clusters_country2$values <- as.character(clusters_country2$values)
+clusters_country2 <- clusters_country2 %>%
+   group_by(rn) %>% #grouping by names from first column
+   mutate(ind = row_number()) %>% #creating id
+   spread(rn, values) #making data frame with column names from first column
+
+clusters_country2 <- clusters_country2 %>% select(membership, names) %>% na.omit()
+colnames(clusters_country2)[2] <- "term"
+colnames(clusters_country)[2] <- "term"
+
+clusters_country2 = left_join(clusters_country2, dt_gath %>% select(term, count), by='term')
+clusters_country2 = clusters_country2[!duplicated(clusters_country2), ]
+clusters_country = left_join(clusters_country, dt_gath %>% select(term, count), by='term')
+clusters_country = clusters_country[!duplicated(clusters_country), ]
+
+overlap = inner_join(clusters_country2 %>% select(term), clusters_country %>% select(term), by='term')
+overlap = overlap[!duplicated(overlap), ]
+
+clusters_country2_filt = clusters_country2 %>% filter(term %in% overlap$term)
+clusters_country_filt = clusters_country %>% filter(term %in% overlap$term)
+
+m1<-colMeans(as.matrix(clusters_country_filt$count))
+m2<-colMeans(as.matrix(clusters_country2_filt$count))
+cov1<-cov(as.matrix(clusters_country_filt$count))
+cov2<-cov(as.matrix(clusters_country2_filt$count))
+bh.distance <-bhattacharyya.dist(clusters_country_filt$coun, clusters_country2_filt$count, cov1, cov2)
+bh.distance
+
+round(bhattacharyya.dist(clusters_country_filt$count,clusters_country2_filt$count,diag(108),diag(108)),digits=2)
+
+#compg.edges <- as.data.frame(get.edgelist(sgdf.copy))
+
+col_coocur = c("1"="#228B22", "2"="#7B68EE", "3"="#B22222")
+ggraph(sgdf.copy, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = eb), show.legend = FALSE) +
+  geom_node_point(aes(color = Clusters), alpha = 0.7, size = 5, palette = "Set2") +
+  geom_node_text(aes(label = ifelse(degree > 20, name, NA)), repel = TRUE) +
+  theme_void() +
+  scale_color_manual(values=col_coocur) +
+  theme(legend.position="none", text=element_text(family="Times New Roman"))
+
+
+```
+
+
+```{r}
+integrum = readLines("~/Downloads/net_regulation/integrum_net_regulation_2.json", encoding="UTF-8") %>% 
+  str_c(collapse = ",") %>%  #collapsing by comma into list objects
+  (function(str) str_c("[", str, "]")) %>% #uniting list objects into list
+  fromJSON(simplifyDataFrame = T) #convert into R object
+ 
+df = as.data.frame(unlist(integrum)) #converting into data frame
+
+setDT(df, keep.rownames = TRUE)[] #taking row names as a separate column
+```
+
+```{r}
+df$rn <- str_replace(df$rn, "[0-9]+", "") #removing digits in row names
+
+colnames(df)[2] <- "values"
+df$values <- as.character(df$values) #converting column with values into character 
+```
+
+```{r}
+df1 <- df %>%
+   group_by(rn) %>% #grouping by names from first column
+   mutate(ind = row_number()) %>% #creating id
+   spread(rn, values) #making data frame with column names from first column
+#write.csv(df1, file="~/media.csv", row.names=F)
+```
+
+```{r}
+df_dates <- df1
+years_lst <- as.character(c(1900:2050))
+df_dates$years <- gsub( ".*(\\d{4}).*", "\\1", df1$high_text)
+df_dates <- df_dates %>% filter(years %in% years_lst)
+df_dates <- df_dates %>% dplyr::select(ind, years)
+```
+
+```{r}
+#data cleaning for high text
+df1$high_text <- str_replace_all(df1$high_text, "\n", " ")
+df1$high_text <- str_replace_all(df1$high_text, "\r", " ")
+df1$high_text <- str_replace_all(df1$high_text, "\\\\n", " ")
+df1$high_text <- str_replace_all(df1$high_text, "[:punct:]", " ")
+df1$high_text <- str_replace_all(df1$high_text, "[0-9]+", " ")
+df1$high_text <- tolower(df1$high_text)
+df1$high_text <- str_replace_all(df1$high_text, "[a-z]", " ")
+df1$high_text <- str_replace_all(df1$high_text, "\\s+", " ") #deleting extra spaces (last)
+df1$num_text = paste('text ', df1$ind)
+
+dates_text = df1 %>% dplyr::select(num_text, date)
+dates_text$date = dmy(dates_text$date)
+dates_text$date = gsub('-', '', dates_text$date)
+dates_text$date = as.numeric(dates_text$date)
+write.csv(dates_text, file="~/Downloads/net_regulation/dates_text.csv", row.names=F)
+
+
+high_text <- df1 %>% dplyr::select(high_text) #making new dataset for lemmatizing via mystem
+write.csv(high_text, file="~/Downloads/net_regulation/high_text.csv", row.names=F)
+#write.csv(df1, file="~/media_tidy.csv", row.names=F)
+
+
+high_text <- read_csv('~/Downloads/net_regulation/high_text.csv')
+tolem = read_csv('~/Downloads/lemmatize/tolem.csv')
+
+library(quanteda)
+high_text$high_text = gsub('\\b\\w{1,3}\\b','',high_text$high_text)
+tolem = read_csv('~/Downloads/lemmatize/output.csv')
+
+# bi-grams
+bigrams = (dfm(high_text$high_text, ngrams = 2, verbose = FALSE))
+head(bigrams)
+```
+
+
+
+```{r}
+library(plotly)
+data <- t(USPersonalExpenditure)
+data <- data.frame("year"=rownames(data), data)
+p = plot_ly(data, x = ~year, y = ~Food.and.Tobacco, name = 'Food and Tobacco', type = 'scatter', mode = 'none', stackgroup = 'one', groupnorm = 'percent', fillcolor = '#F5FF8D') %>%
+  add_trace(y = ~Household.Operation, name = 'Household Operation', fillcolor = '#50CB86') %>%
+  add_trace(y = ~Medical.and.Health, name = 'Medical and Health', fillcolor = '#4C74C9') %>%
+  add_trace(y = ~Personal.Care, name = 'Personal Care', fillcolor = '#700961') %>%
+  add_trace(y = ~Private.Education, name = 'Private Education', fillcolor = '#312F44') %>%
+  layout(title = 'United States Personal Expenditures by Categories',
+         xaxis = list(title = "",
+                      showgrid = FALSE),
+         yaxis = list(title = "Proportion from the Total Expenditures",
+                      showgrid = FALSE,
+                      ticksuffix = '%'))
+chart_link = api_create(p, filename="area-stackedcum")
+chart_link
+
+#?????????????????? legislation
+#???????????? law enforcement
+#?????????????? politics
+#?????????????????? communication industry
+#???????????????????? Internet laws
+#???????????????????? egovernment
+#?????????? online business
+
+
+library(readr)
+data = read_csv('~/Downloads/pv_cluster_count_year.csv')
+data[data == NA] = 0
+data$year = as.factor(data$year)
+colnames(data)[2:8] = c(1:7)
+colnames(data)[2:8] = paste('clust_', colnames(data)[2:8], sep='')
+p=plot_ly(data, x = ~year, y = ~clust_1, name = 'legislation', type = 'scatter', mode = 'none', stackgroup = 'one', groupnorm = 'percent', fillcolor = '#00BFFF') %>%
+  add_trace(x = ~year, y = ~clust_2, name = 'politics', fillcolor = '#2E8B57') %>%
+  add_trace(x = ~year, y = ~clust_3, name = 'online business', fillcolor = '#4169E1') %>%
+  add_trace(x = ~year, y = ~clust_4, name = 'Internet laws', fillcolor = '#8B0000') %>%
+  add_trace(x = ~year, y = ~clust_5, name = 'egovernment', fillcolor = '#BA55D3') %>%
+  add_trace(x = ~year, y = ~clust_6, name = 'law enforcement', fillcolor = '#DAA520') %>%
+  add_trace(x = ~year, y = ~clust_7, name = 'communication industry', fillcolor = '#FF8C00') %>%
+  layout(title = 'United States Personal Expenditures by Categories',
+         xaxis = list(title = "",
+                      showgrid = FALSE),
+         yaxis = list(title = "Proportion from the Total Expenditures",
+                      showgrid = FALSE,
+                      ticksuffix = '%'))
+chart_link = api_create(p, filename="area-stackedcum")
+chart_link
+```
+
+
